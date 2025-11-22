@@ -36,8 +36,8 @@ $base_url = '/kenya_rentals';
         <div class="max-w-7xl mx-auto px-4">
             <div class="flex justify-between items-center py-4">
                 <div class="flex items-center space-x-2">
-                    <i class="fas fa-building text-primary text-2xl"></i>
-                    <a href="<?= $base_url ?>/" class="text-xl font-bold text-gray-800">KenyaRentals</a>
+                    <i class="fas fa-building text-yellow-300 text-2xl"></i>
+                    <a href="<?= $base_url ?>/" class="text-2xl font-bold text-gray-800">HillPark Housing</a>
                 </div>
                 
                 <div class="flex items-center space-x-6">

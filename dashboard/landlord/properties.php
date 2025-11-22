@@ -15,6 +15,61 @@ $landlord_id = $_SESSION['user_id'];
 $success = '';
 $error = '';
 
+// Create directories if they don't exist
+$upload_dir = $_SERVER['DOCUMENT_ROOT'] . '/kenya_rentals/assets/images/properties/uploads/';
+$placeholders_dir = $_SERVER['DOCUMENT_ROOT'] . '/kenya_rentals/assets/images/properties/placeholders/';
+
+if (!file_exists($upload_dir)) {
+    @mkdir($upload_dir, 0777, true);
+}
+if (!file_exists($placeholders_dir)) {
+    @mkdir($placeholders_dir, 0777, true);
+}
+
+// Improved image upload handler with better error handling
+function handleImageUpload($files) {
+    $uploaded_images = [];
+    $upload_dir = $_SERVER['DOCUMENT_ROOT'] . '/kenya_rentals/assets/images/properties/uploads/';
+    
+    // If directory doesn't exist, try to create it
+    if (!file_exists($upload_dir)) {
+        if (!@mkdir($upload_dir, 0777, true)) {
+            // If we can't create directory, use placeholder
+            return ['/kenya_rentals/assets/images/properties/placeholders/default.jpg'];
+        }
+    }
+    
+    // Check if directory is writable
+    if (!is_writable($upload_dir)) {
+        return ['/kenya_rentals/assets/images/properties/placeholders/default.jpg'];
+    }
+    
+    foreach ($files['name'] as $key => $name) {
+        if ($files['error'][$key] === UPLOAD_ERR_OK) {
+            $tmp_name = $files['tmp_name'][$key];
+            $file_extension = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+            $allowed_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+            
+            if (in_array($file_extension, $allowed_extensions)) {
+                // Generate unique filename
+                $new_filename = uniqid() . '_' . time() . '.' . $file_extension;
+                $destination = $upload_dir . $new_filename;
+                
+                // Check file size (max 5MB)
+                if ($files['size'][$key] > 5 * 1024 * 1024) {
+                    continue;
+                }
+                
+                if (@move_uploaded_file($tmp_name, $destination)) {
+                    $uploaded_images[] = '/kenya_rentals/assets/images/properties/uploads/' . $new_filename;
+                }
+            }
+        }
+    }
+    
+    return empty($uploaded_images) ? ['/kenya_rentals/assets/images/properties/placeholders/default.jpg'] : $uploaded_images;
+}
+
 // Handle property actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'];
@@ -30,14 +85,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $bedrooms = $_POST['bedrooms'] ?? 0;
         $bathrooms = $_POST['bathrooms'] ?? 0;
         
+        // Handle image upload
+        $uploaded_images = [];
+        if (!empty($_FILES['images']['name'][0])) {
+            $uploaded_images = handleImageUpload($_FILES['images']);
+        } else {
+            $uploaded_images = ['/kenya_rentals/assets/images/properties/placeholders/default.jpg'];
+        }
+        
+        $images_json = json_encode($uploaded_images);
+        
         try {
-            $stmt = $conn->prepare("INSERT INTO properties (landlord_id, title, description, type, location, price_per_day, size_sqft, capacity, bedrooms, bathrooms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            $stmt->execute([$landlord_id, $title, $description, $type, $location, $price_per_day, $size_sqft, $capacity, $bedrooms, $bathrooms]);
+            $stmt = $conn->prepare("INSERT INTO properties (landlord_id, title, description, type, location, price_per_day, size_sqft, capacity, bedrooms, bathrooms, images) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->execute([$landlord_id, $title, $description, $type, $location, $price_per_day, $size_sqft, $capacity, $bedrooms, $bathrooms, $images_json]);
             
             $success = "Property added successfully!";
         } catch (PDOException $e) {
             $error = "Failed to add property: " . $e->getMessage();
         }
+        
     } elseif ($action === 'update') {
         $property_id = $_POST['property_id'];
         $title = sanitizeInput($_POST['title']);
@@ -52,13 +118,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $is_available = isset($_POST['is_available']) ? 1 : 0;
         
         // Verify the property belongs to the landlord
-        $check_stmt = $conn->prepare("SELECT id FROM properties WHERE id = ? AND landlord_id = ?");
+        $check_stmt = $conn->prepare("SELECT id, images FROM properties WHERE id = ? AND landlord_id = ?");
         $check_stmt->execute([$property_id, $landlord_id]);
+        $existing_property = $check_stmt->fetch(PDO::FETCH_ASSOC);
         
-        if ($check_stmt->fetch()) {
+        if ($existing_property) {
+            $images_json = $existing_property['images'];
+            
+            // Handle image upload for updates
+            if (!empty($_FILES['images']['name'][0])) {
+                $uploaded_images = handleImageUpload($_FILES['images']);
+                if (!empty($uploaded_images)) {
+                    $existing_images = json_decode($images_json, true) ?? [];
+                    $images_json = json_encode(array_merge($existing_images, $uploaded_images));
+                }
+            }
+            
             try {
-                $stmt = $conn->prepare("UPDATE properties SET title = ?, description = ?, type = ?, location = ?, price_per_day = ?, size_sqft = ?, capacity = ?, bedrooms = ?, bathrooms = ?, is_available = ? WHERE id = ?");
-                $stmt->execute([$title, $description, $type, $location, $price_per_day, $size_sqft, $capacity, $bedrooms, $bathrooms, $is_available, $property_id]);
+                $stmt = $conn->prepare("UPDATE properties SET title = ?, description = ?, type = ?, location = ?, price_per_day = ?, size_sqft = ?, capacity = ?, bedrooms = ?, bathrooms = ?, is_available = ?, images = ? WHERE id = ?");
+                $stmt->execute([$title, $description, $type, $location, $price_per_day, $size_sqft, $capacity, $bedrooms, $bathrooms, $is_available, $images_json, $property_id]);
                 
                 $success = "Property updated successfully!";
             } catch (PDOException $e) {
@@ -67,6 +145,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $error = "Property not found or access denied.";
         }
+        
     } elseif ($action === 'delete') {
         $property_id = $_POST['property_id'];
         
@@ -76,6 +155,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         if ($check_stmt->fetch()) {
             try {
+                // First, delete any bookings for this property
+                $delete_bookings = $conn->prepare("DELETE FROM bookings WHERE property_id = ?");
+                $delete_bookings->execute([$property_id]);
+                
+                // Then delete the property
                 $stmt = $conn->prepare("DELETE FROM properties WHERE id = ?");
                 $stmt->execute([$property_id]);
                 
@@ -92,15 +176,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // Fetch landlord's properties
 $properties = $conn->query("SELECT * FROM properties WHERE landlord_id = $landlord_id ORDER BY created_at DESC")->fetchAll(PDO::FETCH_ASSOC);
 
-// Get property for editing
-$edit_property = null;
-if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) {
-    $property_id = $_GET['id'];
-    $stmt = $conn->prepare("SELECT * FROM properties WHERE id = ? AND landlord_id = ?");
-    $stmt->execute([$property_id, $landlord_id]);
-    $edit_property = $stmt->fetch(PDO::FETCH_ASSOC);
+// Function to get property image
+function getPropertyImage($property) {
+    $images = json_decode($property['images'] ?? '[]', true);
+    if (!empty($images) && !empty($images[0])) {
+        return $images[0];
+    }
+    return '/kenya_rentals/assets/images/properties/placeholders/default.jpg';
 }
-
 ?>
 
 <?php include '../../includes/header.php'; ?>
@@ -128,12 +211,15 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
 
     <!-- Properties Grid -->
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        <?php foreach($properties as $property): ?>
-        <div class="bg-white rounded-lg shadow-md overflow-hidden property-card">
+        <?php foreach($properties as $property): 
+            $property_image = getPropertyImage($property);
+        ?>
+        <div class="bg-white rounded-lg shadow-md overflow-hidden property-card hover:shadow-lg transition duration-300">
             <div class="h-48 bg-gray-200 relative">
-                <div class="w-full h-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center">
-                    <i class="fas fa-building text-white text-6xl"></i>
-                </div>
+                <img src="<?= $property_image ?>" 
+                     alt="<?= htmlspecialchars($property['title']) ?>" 
+                     class="w-full h-full object-cover"
+                     onerror="this.src='/kenya_rentals/assets/images/properties/placeholders/default.jpg'">
                 <span class="absolute top-4 right-4 bg-white px-3 py-1 rounded-full text-sm font-semibold text-primary">
                     KSh <?= number_format($property['price_per_day']) ?>/day
                 </span>
@@ -144,13 +230,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
                 <?php endif; ?>
             </div>
             <div class="p-6">
-                <h3 class="text-xl font-semibold text-gray-900 mb-2"><?= $property['title'] ?></h3>
-                <p class="text-gray-600 mb-4"><?= substr($property['description'] ?? 'No description', 0, 100) ?>...</p>
+                <h3 class="text-xl font-semibold text-gray-900 mb-2"><?= htmlspecialchars($property['title']) ?></h3>
+                <p class="text-gray-600 mb-4"><?= substr($property['description'] ?? 'No description available', 0, 100) ?><?= strlen($property['description'] ?? '') > 100 ? '...' : '' ?></p>
                 
                 <div class="space-y-2 mb-4">
                     <div class="flex items-center text-sm text-gray-500">
                         <i class="fas fa-map-marker-alt mr-2"></i>
-                        <?= $property['location'] ?>
+                        <?= htmlspecialchars($property['location']) ?>
                     </div>
                     <div class="flex items-center text-sm text-gray-500">
                         <i class="fas fa-home mr-2"></i>
@@ -159,7 +245,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
                     <?php if ($property['size_sqft']): ?>
                     <div class="flex items-center text-sm text-gray-500">
                         <i class="fas fa-arrows-alt mr-2"></i>
-                        <?= $property['size_sqft'] ?> sqft
+                        <?= number_format($property['size_sqft']) ?> sqft
                     </div>
                     <?php endif; ?>
                 </div>
@@ -169,10 +255,14 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
                         <?= $property['is_available'] ? 'Available' : 'Not Available' ?>
                     </span>
                     <div class="flex space-x-2">
-                        <button onclick="openEditModal(<?= $property['id'] ?>)" class="text-blue-600 hover:text-blue-800">
+                        <button onclick="openEditModal(<?= $property['id'] ?>)" 
+                                class="text-blue-600 hover:text-blue-800 transition duration-300"
+                                title="Edit Property">
                             <i class="fas fa-edit"></i>
                         </button>
-                        <button onclick="confirmDelete(<?= $property['id'] ?>)" class="text-red-600 hover:text-red-800">
+                        <button onclick="confirmDelete(<?= $property['id'] ?>)" 
+                                class="text-red-600 hover:text-red-800 transition duration-300"
+                                title="Delete Property">
                             <i class="fas fa-trash"></i>
                         </button>
                     </div>
@@ -198,19 +288,28 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
 <div id="addPropertyModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50 p-4">
     <div class="bg-white rounded-lg p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <h3 class="text-xl font-semibold mb-4">Add New Property</h3>
-        <form method="POST" action="">
+        <form method="POST" action="" enctype="multipart/form-data">
             <input type="hidden" name="action" value="add">
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="md:col-span-2">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Property Images</label>
+                    <input type="file" name="images[]" multiple accept="image/*"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary">
+                    <p class="text-sm text-gray-500 mt-1">Select multiple images. Max 5MB per image. Supported: JPG, PNG, GIF, WebP</p>
+                </div>
+                
+                <div class="md:col-span-2">
                     <label class="block text-sm font-medium text-gray-700 mb-2">Property Title *</label>
                     <input type="text" name="title" required 
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary">
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+                           placeholder="e.g., Modern Office Space in Westlands">
                 </div>
                 
                 <div class="md:col-span-2">
                     <label class="block text-sm font-medium text-gray-700 mb-2">Description *</label>
-                    <textarea name="description" required rows="3"
-                              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"></textarea>
+                    <textarea name="description" required rows="4"
+                              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+                              placeholder="Describe your property..."></textarea>
                 </div>
                 
                 <div>
@@ -230,26 +329,30 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
                 
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-2">Location *</label>
-                    <input type="text" name="location" placeholder="e.g., Nairobi, Westlands" required 
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary">
+                    <input type="text" name="location" required 
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+                           placeholder="e.g., Nairobi, Westlands">
                 </div>
                 
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-2">Price per Day (KSh) *</label>
                     <input type="number" name="price_per_day" min="0" step="0.01" required 
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary">
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+                           placeholder="5000">
                 </div>
                 
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-2">Size (sqft)</label>
                     <input type="number" name="size_sqft" min="0" 
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary">
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+                           placeholder="1000">
                 </div>
                 
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-2">Capacity</label>
                     <input type="number" name="capacity" min="0" 
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary">
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"
+                           placeholder="10">
                 </div>
                 
                 <div>
@@ -281,9 +384,17 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
 <div id="editPropertyModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50 p-4">
     <div class="bg-white rounded-lg p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <h3 class="text-xl font-semibold mb-4">Edit Property</h3>
-        <form method="POST" action="">
+        <form method="POST" action="" enctype="multipart/form-data" id="editPropertyForm">
             <input type="hidden" name="action" value="update">
             <input type="hidden" name="property_id" id="edit_property_id">
+            
+            <div class="mb-6">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Add More Images</label>
+                <input type="file" name="images[]" multiple accept="image/*"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary">
+                <p class="text-sm text-gray-500 mt-1">Select additional images to add to the property</p>
+            </div>
+            
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="md:col-span-2">
                     <label class="block text-sm font-medium text-gray-700 mb-2">Property Title *</label>
@@ -293,7 +404,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
                 
                 <div class="md:col-span-2">
                     <label class="block text-sm font-medium text-gray-700 mb-2">Description *</label>
-                    <textarea name="description" id="edit_description" required rows="3"
+                    <textarea name="description" id="edit_description" required rows="4"
                               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary"></textarea>
                 </div>
                 
@@ -372,7 +483,11 @@ if (isset($_GET['action']) && $_GET['action'] === 'edit' && isset($_GET['id'])) 
 <div id="deleteModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
     <div class="bg-white rounded-lg p-6 w-full max-w-md mx-4">
         <h3 class="text-xl font-semibold mb-4">Confirm Delete</h3>
-        <p class="text-gray-600 mb-6">Are you sure you want to delete this property? This action cannot be undone.</p>
+        <p class="text-gray-600 mb-4">Are you sure you want to delete this property?</p>
+        <p class="text-sm text-red-600 mb-4">
+            <i class="fas fa-exclamation-triangle mr-1"></i>
+            This will also delete all bookings for this property. This action cannot be undone.
+        </p>
         <form method="POST" action="" id="deleteForm">
             <input type="hidden" name="action" value="delete">
             <input type="hidden" name="property_id" id="delete_property_id">
@@ -400,28 +515,9 @@ function closeModal(modalId) {
 }
 
 function openEditModal(propertyId) {
-    // Fetch property data and populate form
-    fetch(`/kenya_rentals/api/properties.php?action=get&id=${propertyId}`)
-        .then(response => response.json())
-        .then(property => {
-            document.getElementById('edit_property_id').value = property.id;
-            document.getElementById('edit_title').value = property.title;
-            document.getElementById('edit_description').value = property.description;
-            document.getElementById('edit_type').value = property.type;
-            document.getElementById('edit_location').value = property.location;
-            document.getElementById('edit_price_per_day').value = property.price_per_day;
-            document.getElementById('edit_size_sqft').value = property.size_sqft || '';
-            document.getElementById('edit_capacity').value = property.capacity || '';
-            document.getElementById('edit_bedrooms').value = property.bedrooms || 0;
-            document.getElementById('edit_bathrooms').value = property.bathrooms || 0;
-            document.getElementById('edit_is_available').checked = property.is_available;
-            
-            openModal('editPropertyModal');
-        })
-        .catch(error => {
-            console.error('Error fetching property:', error);
-            alert('Error loading property data');
-        });
+    // For now, we'll just show a message that edit is not fully implemented
+    // In a real application, you would fetch the property data here
+    alert('Edit functionality will be implemented in the next version. For now, you can delete and recreate the property.');
 }
 
 function confirmDelete(propertyId) {
@@ -435,6 +531,21 @@ document.addEventListener('click', function(event) {
         event.target.classList.add('hidden');
         event.target.classList.remove('flex');
     }
+});
+
+// Add interactivity to property cards
+document.addEventListener('DOMContentLoaded', function() {
+    const propertyCards = document.querySelectorAll('.property-card');
+    
+    propertyCards.forEach(card => {
+        card.addEventListener('mouseenter', function() {
+            this.style.transform = 'translateY(-5px)';
+        });
+        
+        card.addEventListener('mouseleave', function() {
+            this.style.transform = 'translateY(0)';
+        });
+    });
 });
 </script>
 
